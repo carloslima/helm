@@ -33,6 +33,8 @@ import (
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/kustomize/kyaml/kio"
+	kyaml "sigs.k8s.io/kustomize/kyaml/yaml"
 
 	chart "helm.sh/helm/v4/pkg/chart/v2"
 	chartutil "helm.sh/helm/v4/pkg/chart/v2/util"
@@ -86,6 +88,56 @@ type Configuration struct {
 
 	// HookOutputFunc called with container name and returns and expects writer that will receive the log output.
 	HookOutputFunc func(namespace, pod, container string) io.Writer
+}
+
+func MergeAndAnnotate(files map[string]string) ([]byte, error) {
+	var all []*kyaml.RNode
+	for fname, content := range files {
+		nodes, err := kio.FromBytes([]byte(content))
+		if err != nil {
+			return nil, fmt.Errorf("parsing %s: %w", fname, err)
+		}
+		for _, rn := range nodes {
+			if err := rn.PipeE(kyaml.SetAnnotation("filename", fname)); err != nil {
+				return nil, fmt.Errorf("annotating %s: %w", fname, err)
+			}
+			all = append(all, rn)
+		}
+	}
+
+	s, err := kio.StringAll(all)
+	if err != nil {
+		return nil, fmt.Errorf("writing merged docs: %w", err)
+	}
+	return []byte(s), nil
+}
+
+func SplitAndDeannotate(postrendered []byte) (map[string]string, error) {
+	parsed, err := kio.FromBytes(postrendered)
+	if err != nil {
+		return nil, fmt.Errorf("re-parsing merged buffer: %w", err)
+	}
+
+	grouped := make(map[string][]*kyaml.RNode)
+	for _, rn := range parsed {
+		meta, err := rn.GetMeta()
+		if err != nil {
+			return nil, fmt.Errorf("getting metadata: %w", err)
+		}
+		fname := meta.Annotations["filename"]
+		rn.PipeE(kyaml.ClearAnnotation("filename"))
+		grouped[fname] = append(grouped[fname], rn)
+	}
+
+	reconstructed := make(map[string]string, len(grouped))
+	for fname, docs := range grouped {
+		s, err := kio.StringAll(docs)
+		if err != nil {
+			return nil, fmt.Errorf("re-writing %s: %w", fname, err)
+		}
+		reconstructed[fname] = s
+	}
+	return reconstructed, nil
 }
 
 // renderResources renders the templates in a chart
@@ -157,6 +209,20 @@ func (cfg *Configuration) renderResources(ch *chart.Chart, values chartutil.Valu
 	}
 	notes := notesBuffer.String()
 
+	if pr != nil {
+		var merged []byte
+		if merged, err = MergeAndAnnotate(files); err != nil {
+			return hs, b, notes, fmt.Errorf("error merging manifests, %w", err)
+		}
+		mod, err := pr.Run(bytes.NewBuffer(merged))
+		if err != nil {
+			return hs, b, notes, fmt.Errorf("error while running post render on files: %w", err)
+		}
+		if files, err = SplitAndDeannotate(mod.Bytes()); err != nil {
+			return hs, b, notes, fmt.Errorf("error while parsing post rendered files: %w", err)
+		}
+	}
+
 	// Sort hooks, manifests, and partials. Only hooks and manifests are returned,
 	// as partials are not used after renderer.Render. Empty manifests are also
 	// removed here.
@@ -214,13 +280,6 @@ func (cfg *Configuration) renderResources(ch *chart.Chart, values chartutil.Valu
 				return hs, b, "", err
 			}
 			fileWritten[m.Name] = true
-		}
-	}
-
-	if pr != nil {
-		b, err = pr.Run(b)
-		if err != nil {
-			return hs, b, notes, fmt.Errorf("error while running post render on files: %w", err)
 		}
 	}
 
