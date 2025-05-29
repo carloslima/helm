@@ -421,7 +421,7 @@ kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
-    filename: 'templates/configmap.yaml'
+    ` + FilenameAnnotation + `: 'templates/configmap.yaml'
 data:
   key: value
 `
@@ -450,7 +450,7 @@ kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
-    filename: 'templates/configmap.yaml'
+    ` + FilenameAnnotation + `: 'templates/configmap.yaml'
 data:
   key: value
 ---
@@ -459,7 +459,7 @@ kind: Secret
 metadata:
   name: test-secret
   annotations:
-    filename: 'templates/secret.yaml'
+    ` + FilenameAnnotation + `: 'templates/secret.yaml'
 data:
   password: dGVzdA==
 `
@@ -489,7 +489,7 @@ kind: ConfigMap
 metadata:
   name: test-cm1
   annotations:
-    filename: 'templates/multi.yaml'
+    ` + FilenameAnnotation + `: 'templates/multi.yaml'
 data:
   key: value1
 ---
@@ -498,7 +498,7 @@ kind: ConfigMap
 metadata:
   name: test-cm2
   annotations:
-    filename: 'templates/multi.yaml'
+    ` + FilenameAnnotation + `: 'templates/multi.yaml'
 data:
   key: value2
 `
@@ -525,7 +525,7 @@ kind: ConfigMap
 metadata:
   name: test-cm1
   annotations:
-    filename: 'templates/cm.yaml'
+    ` + FilenameAnnotation + `: 'templates/cm.yaml'
 `
 				assert.Equal(t, expected, merged)
 			},
@@ -581,7 +581,7 @@ kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
-    filename: templates/configmap.yaml
+    ` + FilenameAnnotation + `: templates/configmap.yaml
 data:
   key: value`,
 			expectedFiles: map[string]string{
@@ -601,7 +601,7 @@ kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
-    filename: templates/configmap.yaml
+    ` + FilenameAnnotation + `: templates/configmap.yaml
 data:
   key: value
 ---
@@ -610,7 +610,7 @@ kind: Secret
 metadata:
   name: test-secret
   annotations:
-    filename: templates/secret.yaml
+    ` + FilenameAnnotation + `: templates/secret.yaml
 data:
   password: dGVzdA==`,
 			expectedFiles: map[string]string{
@@ -637,7 +637,7 @@ kind: ConfigMap
 metadata:
   name: test-cm1
   annotations:
-    filename: templates/multi.yaml
+    ` + FilenameAnnotation + `: templates/multi.yaml
 data:
   key: value1
 ---
@@ -646,7 +646,7 @@ kind: ConfigMap
 metadata:
   name: test-cm2
   annotations:
-    filename: templates/multi.yaml
+    ` + FilenameAnnotation + `: templates/multi.yaml
 data:
   key: value2`,
 			expectedFiles: map[string]string{
@@ -673,7 +673,7 @@ kind: ConfigMap
 metadata:
   name: test-cm
   annotations:
-    filename: templates/configmap.yaml
+    ` + FilenameAnnotation + `: templates/configmap.yaml
     other-annotation: should-remain
 data:
   key: value`,
