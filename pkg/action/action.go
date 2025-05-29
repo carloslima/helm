@@ -93,6 +93,12 @@ type Configuration struct {
 func MergeAndAnnotate(files map[string]string) ([]byte, error) {
 	var all []*kyaml.RNode
 	for fname, content := range files {
+
+		// Skip partials and empty files.
+		if strings.HasPrefix(path.Base(fname), "_") || strings.TrimSpace(content) == "" {
+			continue
+		}
+
 		nodes, err := kio.FromBytes([]byte(content))
 		if err != nil {
 			return nil, fmt.Errorf("parsing %s: %w", fname, err)

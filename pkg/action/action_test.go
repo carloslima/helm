@@ -466,6 +466,32 @@ data:
 			},
 		},
 		{
+			name: "partials and empty files are removed",
+			files: map[string]string{
+				"templates/cm.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+`,
+				"templates/_partial.tpl": `
+{{-define name}}
+  {{- "abracadabra"}}
+{{- end -}}`,
+				"templates/empty.yaml": ``,
+			},
+			validate: func(t *testing.T, merged []byte) {
+				content := string(merged)
+				expected := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+  annotations:
+    filename: 'templates/cm.yaml'
+`
+				assert.Equal(t, expected, content)
+			},
+		},
+		{
 			name: "empty file",
 			files: map[string]string{
 				"templates/empty.yaml": "",
@@ -473,7 +499,8 @@ data:
 			validate: func(t *testing.T, merged []byte) {
 				content := string(merged)
 				// Empty files should result in minimal output
-				assert.True(t, len(content) < 50, "Empty file should produce minimal output")
+				t.Log(content, len(content))
+				assert.True(t, len(content) == 0, "Empty file should produce no output")
 			},
 		},
 		{
