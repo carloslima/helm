@@ -391,19 +391,18 @@ func (m *mockPostRenderer) Run(renderedManifests *bytes.Buffer) (*bytes.Buffer, 
 	return bytes.NewBufferString(content), nil
 }
 
-func TestMergeAndAnnotate(t *testing.T) {
+func TestAnnotateAndMerge(t *testing.T) {
 	tests := []struct {
 		name          string
 		files         map[string]string
 		expectedError string
-		validate      func(t *testing.T, merged []byte)
+		validate      func(t *testing.T, merged string)
 	}{
 		{
 			name:  "no files",
 			files: map[string]string{},
-			validate: func(t *testing.T, merged []byte) {
-				content := string(merged)
-				assert.Equal(t, "", content)
+			validate: func(t *testing.T, merged string) {
+				assert.Equal(t, "", merged)
 			},
 		},
 		{
@@ -416,8 +415,7 @@ metadata:
 data:
   key: value`,
 			},
-			validate: func(t *testing.T, merged []byte) {
-				content := string(merged)
+			validate: func(t *testing.T, merged string) {
 				expected := `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -427,7 +425,7 @@ metadata:
 data:
   key: value
 `
-				assert.Equal(t, expected, content)
+				assert.Equal(t, expected, merged)
 			},
 		},
 		{
@@ -446,8 +444,7 @@ metadata:
 data:
   password: dGVzdA==`,
 			},
-			validate: func(t *testing.T, merged []byte) {
-				content := string(merged)
+			validate: func(t *testing.T, merged string) {
 				expected := `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -466,7 +463,7 @@ metadata:
 data:
   password: dGVzdA==
 `
-				assert.Equal(t, expected, content)
+				assert.Equal(t, expected, merged)
 			},
 		},
 		{
@@ -486,8 +483,7 @@ metadata:
 data:
   key: value2`,
 			},
-			validate: func(t *testing.T, merged []byte) {
-				content := string(merged)
+			validate: func(t *testing.T, merged string) {
 				expected := `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -506,7 +502,7 @@ metadata:
 data:
   key: value2
 `
-				assert.Equal(t, expected, content)
+				assert.Equal(t, expected, merged)
 			},
 		},
 		{
@@ -523,8 +519,7 @@ metadata:
 {{- end -}}`,
 				"templates/empty.yaml": ``,
 			},
-			validate: func(t *testing.T, merged []byte) {
-				content := string(merged)
+			validate: func(t *testing.T, merged string) {
 				expected := `apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -532,7 +527,7 @@ metadata:
   annotations:
     filename: 'templates/cm.yaml'
 `
-				assert.Equal(t, expected, content)
+				assert.Equal(t, expected, merged)
 			},
 		},
 		{
@@ -540,9 +535,8 @@ metadata:
 			files: map[string]string{
 				"templates/empty.yaml": "",
 			},
-			validate: func(t *testing.T, merged []byte) {
-				content := string(merged)
-				assert.True(t, len(content) == 0, "Empty file should produce no output")
+			validate: func(t *testing.T, merged string) {
+				assert.True(t, len(merged) == 0, "Empty file should produce no output")
 			},
 		},
 		{
@@ -557,7 +551,7 @@ metadata:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			merged, err := MergeAndAnnotate(tt.files)
+			merged, err := AnnotateAndMerge(tt.files)
 
 			if tt.expectedError != "" {
 				assert.Error(t, err)
@@ -722,7 +716,7 @@ data:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			files, err := SplitAndDeannotate([]byte(tt.input))
+			files, err := SplitAndDeannotate(tt.input)
 
 			if tt.expectedError != "" {
 				assert.Error(t, err)
@@ -741,7 +735,7 @@ data:
 	}
 }
 
-func TestMergeAndAnnotate_SplitAndDeannotate_Roundtrip(t *testing.T) {
+func TestAnnotateAndMerge_SplitAndDeannotate_Roundtrip(t *testing.T) {
 	// Test that merge/split operations are symmetric
 	originalFiles := map[string]string{
 		"templates/configmap.yaml": `apiVersion: v1
@@ -772,7 +766,7 @@ data:
 	}
 
 	// Merge and annotate
-	merged, err := MergeAndAnnotate(originalFiles)
+	merged, err := AnnotateAndMerge(originalFiles)
 	require.NoError(t, err)
 
 	// Split and deannotate
@@ -867,7 +861,7 @@ func TestRenderResources_PostRenderer_MergeError(t *testing.T) {
 	// Create a mock post-renderer
 	mockPR := &mockPostRenderer{}
 
-	// Create a chart with invalid YAML that would cause MergeAndAnnotate to fail
+	// Create a chart with invalid YAML that would cause AnnotateAndMerge to fail
 	ch := &chart.Chart{
 		Metadata: &chart.Metadata{
 			APIVersion: "v1",

@@ -90,43 +90,46 @@ type Configuration struct {
 	HookOutputFunc func(namespace, pod, container string) io.Writer
 }
 
-func MergeAndAnnotate(files map[string]string) ([]byte, error) {
-	var all []*kyaml.RNode
+// AnnotateAndMerge combines multiple YAML files into a single stream of documents,
+// adding filename annotations to each document for later reconstruction.
+func AnnotateAndMerge(files map[string]string) (string, error) {
+	var combinedManifests []*kyaml.RNode
 	for fname, content := range files {
-
 		// Skip partials and empty files.
 		if strings.HasPrefix(path.Base(fname), "_") || strings.TrimSpace(content) == "" {
 			continue
 		}
 
-		nodes, err := kio.FromBytes([]byte(content))
+		manifests, err := kio.ParseAll(content)
 		if err != nil {
-			return nil, fmt.Errorf("parsing %s: %w", fname, err)
+			return "", fmt.Errorf("parsing %s: %w", fname, err)
 		}
-		for _, rn := range nodes {
-			if err := rn.PipeE(kyaml.SetAnnotation("filename", fname)); err != nil {
-				return nil, fmt.Errorf("annotating %s: %w", fname, err)
+		for _, manifest := range manifests {
+			if err := manifest.PipeE(kyaml.SetAnnotation("filename", fname)); err != nil {
+				return "", fmt.Errorf("annotating %s: %w", fname, err)
 			}
-			all = append(all, rn)
+			combinedManifests = append(combinedManifests, manifest)
 		}
 	}
 
-	s, err := kio.StringAll(all)
+	merged, err := kio.StringAll(combinedManifests)
 	if err != nil {
-		return nil, fmt.Errorf("writing merged docs: %w", err)
+		return "", fmt.Errorf("writing merged docs: %w", err)
 	}
-	return []byte(s), nil
+	return merged, nil
 }
 
-func SplitAndDeannotate(postrendered []byte) (map[string]string, error) {
-	parsed, err := kio.FromBytes(postrendered)
+// SplitAndDeannotate reconstructs individual files from a merged YAML stream,
+// removing filename annotations and grouping documents by their original filenames.
+func SplitAndDeannotate(postrendered string) (map[string]string, error) {
+	manifests, err := kio.ParseAll(postrendered)
 	if err != nil {
 		return nil, fmt.Errorf("re-parsing merged buffer: %w", err)
 	}
 
-	grouped := make(map[string][]*kyaml.RNode)
-	for i, rn := range parsed {
-		meta, err := rn.GetMeta()
+	manifestsByFilename := make(map[string][]*kyaml.RNode)
+	for i, manifest := range manifests {
+		meta, err := manifest.GetMeta()
 		if err != nil {
 			return nil, fmt.Errorf("getting metadata: %w", err)
 		}
@@ -134,17 +137,19 @@ func SplitAndDeannotate(postrendered []byte) (map[string]string, error) {
 		if fname == "" {
 			fname = fmt.Sprintf("generated-by-postrender-%d.yaml", i)
 		}
-		rn.PipeE(kyaml.ClearAnnotation("filename"))
-		grouped[fname] = append(grouped[fname], rn)
+		if err := manifest.PipeE(kyaml.ClearAnnotation("filename")); err != nil {
+			return nil, fmt.Errorf("clearing filename annotation: %w", err)
+		}
+		manifestsByFilename[fname] = append(manifestsByFilename[fname], manifest)
 	}
 
-	reconstructed := make(map[string]string, len(grouped))
-	for fname, docs := range grouped {
-		s, err := kio.StringAll(docs)
+	reconstructed := make(map[string]string, len(manifestsByFilename))
+	for fname, docs := range manifestsByFilename {
+		fileContents, err := kio.StringAll(docs)
 		if err != nil {
 			return nil, fmt.Errorf("re-writing %s: %w", fname, err)
 		}
-		reconstructed[fname] = s
+		reconstructed[fname] = fileContents
 	}
 	return reconstructed, nil
 }
@@ -219,15 +224,27 @@ func (cfg *Configuration) renderResources(ch *chart.Chart, values chartutil.Valu
 	notes := notesBuffer.String()
 
 	if pr != nil {
-		var merged []byte
-		if merged, err = MergeAndAnnotate(files); err != nil {
-			return hs, b, notes, fmt.Errorf("error merging manifests, %w", err)
+		// We need to send files to the post-renderer before sorting and splitting
+		// hooks from manifests. The post-renderer interface expects a stream of
+		// manifests (similar to what tools like Kustomize and kubectl expect), whereas
+		// the sorter uses filenames.
+		// Here, we merge the documents into a stream, post-render them, and then split
+		// them back into a map of filename -> content.
+
+		// Merge files as stream of documents for sending to post renderer
+		var merged string
+		if merged, err = AnnotateAndMerge(files); err != nil {
+			return hs, b, notes, fmt.Errorf("error merging manifests: %w", err)
 		}
-		mod, err := pr.Run(bytes.NewBuffer(merged))
+
+		// Run the post renderer
+		postRendered, err := pr.Run(bytes.NewBufferString(merged))
 		if err != nil {
 			return hs, b, notes, fmt.Errorf("error while running post render on files: %w", err)
 		}
-		if files, err = SplitAndDeannotate(mod.Bytes()); err != nil {
+
+		// Use the file list and contents received from the post renderer
+		if files, err = SplitAndDeannotate(postRendered.String()); err != nil {
 			return hs, b, notes, fmt.Errorf("error while parsing post rendered files: %w", err)
 		}
 	}
