@@ -16,13 +16,17 @@ limitations under the License.
 package action
 
 import (
+	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	fakeclientset "k8s.io/client-go/kubernetes/fake"
 
 	"helm.sh/helm/v4/internal/logging"
@@ -366,4 +370,508 @@ func TestGetVersionSet(t *testing.T) {
 	if vs.Has("nosuchversion/v1") {
 		t.Error("Non-existent version is reported found.")
 	}
+}
+
+// Mock PostRenderer for testing
+type mockPostRenderer struct {
+	shouldError bool
+	transform   func(string) string
+}
+
+func (m *mockPostRenderer) Run(renderedManifests *bytes.Buffer) (*bytes.Buffer, error) {
+	if m.shouldError {
+		return nil, errors.New("mock post-renderer error")
+	}
+
+	content := renderedManifests.String()
+	if m.transform != nil {
+		content = m.transform(content)
+	}
+
+	return bytes.NewBufferString(content), nil
+}
+
+func TestMergeAndAnnotate(t *testing.T) {
+	tests := []struct {
+		name          string
+		files         map[string]string
+		expectedError string
+		validate      func(t *testing.T, merged []byte)
+	}{
+		{
+			name: "single file with single manifest",
+			files: map[string]string{
+				"templates/configmap.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value`,
+			},
+			validate: func(t *testing.T, merged []byte) {
+				content := string(merged)
+				assert.Contains(t, content, "filename: 'templates/configmap.yaml'")
+				assert.Contains(t, content, "kind: ConfigMap")
+				assert.Contains(t, content, "name: test-cm")
+			},
+		},
+		{
+			name: "multiple files with multiple manifests",
+			files: map[string]string{
+				"templates/configmap.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value`,
+				"templates/secret.yaml": `apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+data:
+  password: dGVzdA==`,
+			},
+			validate: func(t *testing.T, merged []byte) {
+				content := string(merged)
+				assert.Contains(t, content, "filename: 'templates/configmap.yaml'")
+				assert.Contains(t, content, "filename: 'templates/secret.yaml'")
+				assert.Contains(t, content, "kind: ConfigMap")
+				assert.Contains(t, content, "kind: Secret")
+			},
+		},
+		{
+			name: "file with multiple manifests",
+			files: map[string]string{
+				"templates/multi.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+data:
+  key: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm2
+data:
+  key: value2`,
+			},
+			validate: func(t *testing.T, merged []byte) {
+				content := string(merged)
+				// Both manifests should have the same filename annotation
+				occurrences := strings.Count(content, "filename: 'templates/multi.yaml'")
+				assert.Equal(t, 2, occurrences, "Both manifests should be annotated with the same filename")
+				assert.Contains(t, content, "name: test-cm1")
+				assert.Contains(t, content, "name: test-cm2")
+			},
+		},
+		{
+			name: "empty file",
+			files: map[string]string{
+				"templates/empty.yaml": "",
+			},
+			validate: func(t *testing.T, merged []byte) {
+				content := string(merged)
+				// Empty files should result in minimal output
+				assert.True(t, len(content) < 50, "Empty file should produce minimal output")
+			},
+		},
+		{
+			name: "invalid yaml",
+			files: map[string]string{
+				"templates/invalid.yaml": `invalid: yaml: content:
+  - malformed`,
+			},
+			expectedError: "parsing templates/invalid.yaml",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			merged, err := MergeAndAnnotate(tt.files)
+
+			if tt.expectedError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, merged)
+				if tt.validate != nil {
+					tt.validate(t, merged)
+				}
+			}
+		})
+	}
+}
+
+func TestSplitAndDeannotate(t *testing.T) {
+	tests := []struct {
+		name          string
+		input         string
+		expectedFiles map[string]string
+		expectedError string
+	}{
+		{
+			name: "single annotated manifest",
+			input: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  annotations:
+    filename: templates/configmap.yaml
+data:
+  key: value`,
+			expectedFiles: map[string]string{
+				"templates/configmap.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value
+`,
+			},
+		},
+		{
+			name: "multiple manifests with different filenames",
+			input: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  annotations:
+    filename: templates/configmap.yaml
+data:
+  key: value
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+  annotations:
+    filename: templates/secret.yaml
+data:
+  password: dGVzdA==`,
+			expectedFiles: map[string]string{
+				"templates/configmap.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value
+`,
+				"templates/secret.yaml": `apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+data:
+  password: dGVzdA==
+`,
+			},
+		},
+		{
+			name: "multiple manifests with same filename",
+			input: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+  annotations:
+    filename: templates/multi.yaml
+data:
+  key: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm2
+  annotations:
+    filename: templates/multi.yaml
+data:
+  key: value2`,
+			expectedFiles: map[string]string{
+				"templates/multi.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+data:
+  key: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm2
+data:
+  key: value2
+`,
+			},
+		},
+		{
+			name: "manifest with other annotations",
+			input: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  annotations:
+    filename: templates/configmap.yaml
+    other-annotation: should-remain
+data:
+  key: value`,
+			expectedFiles: map[string]string{
+				"templates/configmap.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  annotations:
+    other-annotation: should-remain
+data:
+  key: value
+`,
+			},
+		},
+		{
+			name:          "invalid yaml input",
+			input:         "invalid: yaml: content:",
+			expectedError: "re-parsing merged buffer",
+		},
+		{
+			name: "manifest without filename annotation",
+			input: `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value`,
+			expectedFiles: map[string]string{
+				"": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value
+`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			files, err := SplitAndDeannotate([]byte(tt.input))
+
+			if tt.expectedError != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectedError)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, len(tt.expectedFiles), len(files))
+
+				for expectedFile, expectedContent := range tt.expectedFiles {
+					actualContent, exists := files[expectedFile]
+					assert.True(t, exists, "Expected file %s not found", expectedFile)
+					assert.Equal(t, expectedContent, actualContent)
+				}
+			}
+		})
+	}
+}
+
+func TestMergeAndAnnotate_SplitAndDeannotate_Roundtrip(t *testing.T) {
+	// Test that merge/split operations are symmetric
+	originalFiles := map[string]string{
+		"templates/configmap.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+data:
+  key: value`,
+		"templates/secret.yaml": `apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+data:
+  password: dGVzdA==`,
+		"templates/multi.yaml": `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+data:
+  key: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm2
+data:
+  key: value2`,
+	}
+
+	// Merge and annotate
+	merged, err := MergeAndAnnotate(originalFiles)
+	require.NoError(t, err)
+
+	// Split and deannotate
+	reconstructed, err := SplitAndDeannotate(merged)
+	require.NoError(t, err)
+
+	// Compare the results
+	assert.Equal(t, len(originalFiles), len(reconstructed))
+	for filename, originalContent := range originalFiles {
+		reconstructedContent, exists := reconstructed[filename]
+		assert.True(t, exists, "File %s should exist in reconstructed files", filename)
+
+		// Normalize whitespace for comparison since YAML processing might affect formatting
+		normalizeContent := func(content string) string {
+			return strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+		}
+
+		assert.Equal(t, normalizeContent(originalContent), normalizeContent(reconstructedContent))
+	}
+}
+
+func TestRenderResources_PostRenderer_Success(t *testing.T) {
+	cfg := actionConfigFixture(t)
+
+	// Create a simple mock post-renderer that adds a label
+	mockPR := &mockPostRenderer{
+		transform: func(content string) string {
+			content = strings.ReplaceAll(content, "hello", "yellow")
+			content = strings.ReplaceAll(content, "goodbye", "foodpie")
+			return strings.ReplaceAll(content,
+				"test-cm",
+				"test-cm-postrendered")
+		},
+	}
+
+	ch := buildChart(withSampleTemplates())
+	values := map[string]interface{}{}
+
+	hooks, buf, notes, err := cfg.renderResources(
+		ch, values, "test-release", "", false, false, false,
+		mockPR, false, false, false,
+	)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, hooks)
+	assert.NotNil(t, buf)
+	assert.Equal(t, "", notes) // Notes should be empty for this test
+	assert.Contains(t, hooks[0].Manifest, "test-cm-postrendered")
+	assert.Contains(t, buf.String(), "yellow")
+	assert.Contains(t, buf.String(), "foodpie")
+}
+
+func TestRenderResources_PostRenderer_Error(t *testing.T) {
+	cfg := actionConfigFixture(t)
+
+	// Create a post-renderer that returns an error
+	mockPR := &mockPostRenderer{
+		shouldError: true,
+	}
+
+	ch := buildChart(withSampleTemplates())
+	values := map[string]interface{}{}
+
+	_, _, _, err := cfg.renderResources(
+		ch, values, "test-release", "", false, false, false,
+		mockPR, false, false, false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "error while running post render on files")
+}
+
+func TestRenderResources_PostRenderer_MergeError(t *testing.T) {
+	cfg := actionConfigFixture(t)
+
+	// Create a mock post-renderer
+	mockPR := &mockPostRenderer{}
+
+	// Create a chart with invalid YAML that would cause MergeAndAnnotate to fail
+	ch := &chart.Chart{
+		Metadata: &chart.Metadata{
+			APIVersion: "v1",
+			Name:       "test-chart",
+			Version:    "0.1.0",
+		},
+		Templates: []*chart.File{
+			{Name: "templates/invalid", Data: []byte("invalid: yaml: content:")},
+		},
+	}
+	values := map[string]interface{}{}
+
+	_, _, _, err := cfg.renderResources(
+		ch, values, "test-release", "", false, false, false,
+		mockPR, false, false, false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "error merging manifests")
+}
+
+func TestRenderResources_PostRenderer_SplitError(t *testing.T) {
+	cfg := actionConfigFixture(t)
+
+	// Create a post-renderer that returns invalid YAML
+	mockPR := &mockPostRenderer{
+		transform: func(_ string) string {
+			return "invalid: yaml: content:"
+		},
+	}
+
+	ch := buildChart(withSampleTemplates())
+	values := map[string]interface{}{}
+
+	_, _, _, err := cfg.renderResources(
+		ch, values, "test-release", "", false, false, false,
+		mockPR, false, false, false,
+	)
+
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "error while parsing post rendered files")
+}
+
+func TestRenderResources_PostRenderer_Integration(t *testing.T) {
+	cfg := actionConfigFixture(t)
+
+	// Create a post-renderer that modifies the manifests in a predictable way
+	mockPR := &mockPostRenderer{
+		transform: func(content string) string {
+			return strings.ReplaceAll(content, "metadata:", "color: blue\nmetadata:")
+		},
+	}
+
+	ch := buildChart(withSampleTemplates())
+	values := map[string]interface{}{}
+
+	hooks, buf, notes, err := cfg.renderResources(
+		ch, values, "test-release", "", false, false, false,
+		mockPR, false, false, false,
+	)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, hooks)
+	assert.NotNil(t, buf)
+	assert.Equal(t, "", notes) // Notes should be empty for this test
+
+	// Verify that the post-renderer modifications are present in the output
+	output := buf.String()
+	assert.Contains(t, output, "color: blue")
+	assert.Equal(t, 3, strings.Count(output, "color: blue"))
+}
+
+func TestRenderResources_NoPostRenderer(t *testing.T) {
+	cfg := actionConfigFixture(t)
+
+	ch := buildChart(withSampleTemplates())
+	values := map[string]interface{}{}
+
+	hooks, buf, notes, err := cfg.renderResources(
+		ch, values, "test-release", "", false, false, false,
+		nil, false, false, false,
+	)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, hooks)
+	assert.NotNil(t, buf)
+	assert.Equal(t, "", notes) // Notes should be empty for this test
+
+	// When no post-renderer is provided, output should not contain filename annotations
+	output := buf.String()
+	assert.NotContains(t, output, "filename:")
 }
