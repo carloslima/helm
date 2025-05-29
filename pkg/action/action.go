@@ -125,12 +125,15 @@ func SplitAndDeannotate(postrendered []byte) (map[string]string, error) {
 	}
 
 	grouped := make(map[string][]*kyaml.RNode)
-	for _, rn := range parsed {
+	for i, rn := range parsed {
 		meta, err := rn.GetMeta()
 		if err != nil {
 			return nil, fmt.Errorf("getting metadata: %w", err)
 		}
 		fname := meta.Annotations["filename"]
+		if fname == "" {
+			fname = fmt.Sprintf("generated-by-postrender-%d.yaml", i)
+		}
 		rn.PipeE(kyaml.ClearAnnotation("filename"))
 		grouped[fname] = append(grouped[fname], rn)
 	}

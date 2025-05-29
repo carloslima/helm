@@ -399,6 +399,14 @@ func TestMergeAndAnnotate(t *testing.T) {
 		validate      func(t *testing.T, merged []byte)
 	}{
 		{
+			name:  "no files",
+			files: map[string]string{},
+			validate: func(t *testing.T, merged []byte) {
+				content := string(merged)
+				assert.Equal(t, "", content)
+			},
+		},
+		{
 			name: "single file with single manifest",
 			files: map[string]string{
 				"templates/configmap.yaml": `apiVersion: v1
@@ -410,9 +418,16 @@ data:
 			},
 			validate: func(t *testing.T, merged []byte) {
 				content := string(merged)
-				assert.Contains(t, content, "filename: 'templates/configmap.yaml'")
-				assert.Contains(t, content, "kind: ConfigMap")
-				assert.Contains(t, content, "name: test-cm")
+				expected := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  annotations:
+    filename: 'templates/configmap.yaml'
+data:
+  key: value
+`
+				assert.Equal(t, expected, content)
 			},
 		},
 		{
@@ -433,10 +448,25 @@ data:
 			},
 			validate: func(t *testing.T, merged []byte) {
 				content := string(merged)
-				assert.Contains(t, content, "filename: 'templates/configmap.yaml'")
-				assert.Contains(t, content, "filename: 'templates/secret.yaml'")
-				assert.Contains(t, content, "kind: ConfigMap")
-				assert.Contains(t, content, "kind: Secret")
+				expected := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm
+  annotations:
+    filename: 'templates/configmap.yaml'
+data:
+  key: value
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: test-secret
+  annotations:
+    filename: 'templates/secret.yaml'
+data:
+  password: dGVzdA==
+`
+				assert.Equal(t, expected, content)
 			},
 		},
 		{
@@ -458,11 +488,25 @@ data:
 			},
 			validate: func(t *testing.T, merged []byte) {
 				content := string(merged)
-				// Both manifests should have the same filename annotation
-				occurrences := strings.Count(content, "filename: 'templates/multi.yaml'")
-				assert.Equal(t, 2, occurrences, "Both manifests should be annotated with the same filename")
-				assert.Contains(t, content, "name: test-cm1")
-				assert.Contains(t, content, "name: test-cm2")
+				expected := `apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm1
+  annotations:
+    filename: 'templates/multi.yaml'
+data:
+  key: value1
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: test-cm2
+  annotations:
+    filename: 'templates/multi.yaml'
+data:
+  key: value2
+`
+				assert.Equal(t, expected, content)
 			},
 		},
 		{
@@ -498,8 +542,6 @@ metadata:
 			},
 			validate: func(t *testing.T, merged []byte) {
 				content := string(merged)
-				// Empty files should result in minimal output
-				t.Log(content, len(content))
 				assert.True(t, len(content) == 0, "Empty file should produce no output")
 			},
 		},
@@ -667,7 +709,7 @@ metadata:
 data:
   key: value`,
 			expectedFiles: map[string]string{
-				"": `apiVersion: v1
+				"generated-by-postrender-0.yaml": `apiVersion: v1
 kind: ConfigMap
 metadata:
   name: test-cm
@@ -755,14 +797,12 @@ data:
 func TestRenderResources_PostRenderer_Success(t *testing.T) {
 	cfg := actionConfigFixture(t)
 
-	// Create a simple mock post-renderer that adds a label
+	// Create a simple mock post-renderer
 	mockPR := &mockPostRenderer{
 		transform: func(content string) string {
 			content = strings.ReplaceAll(content, "hello", "yellow")
 			content = strings.ReplaceAll(content, "goodbye", "foodpie")
-			return strings.ReplaceAll(content,
-				"test-cm",
-				"test-cm-postrendered")
+			return strings.ReplaceAll(content, "test-cm", "test-cm-postrendered")
 		},
 	}
 
@@ -777,10 +817,28 @@ func TestRenderResources_PostRenderer_Success(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, hooks)
 	assert.NotNil(t, buf)
-	assert.Equal(t, "", notes) // Notes should be empty for this test
-	assert.Contains(t, hooks[0].Manifest, "test-cm-postrendered")
-	assert.Contains(t, buf.String(), "yellow")
-	assert.Contains(t, buf.String(), "foodpie")
+	assert.Equal(t, "", notes)
+	expectedBuf := `---
+# Source: yellow/templates/foodpie
+foodpie: world
+---
+# Source: yellow/templates/with-partials
+yellow: Earth
+---
+# Source: yellow/templates/yellow
+yellow: world
+`
+	expectedHook := `kind: ConfigMap
+metadata:
+  name: test-cm-postrendered
+  annotations:
+    "helm.sh/hook": post-install,pre-delete,post-upgrade
+data:
+  name: value`
+
+	assert.Equal(t, expectedBuf, buf.String())
+	assert.Len(t, hooks, 1)
+	assert.Equal(t, expectedHook, hooks[0].Manifest)
 }
 
 func TestRenderResources_PostRenderer_Error(t *testing.T) {
@@ -856,7 +914,6 @@ func TestRenderResources_PostRenderer_SplitError(t *testing.T) {
 func TestRenderResources_PostRenderer_Integration(t *testing.T) {
 	cfg := actionConfigFixture(t)
 
-	// Create a post-renderer that modifies the manifests in a predictable way
 	mockPR := &mockPostRenderer{
 		transform: func(content string) string {
 			return strings.ReplaceAll(content, "metadata:", "color: blue\nmetadata:")
@@ -878,8 +935,22 @@ func TestRenderResources_PostRenderer_Integration(t *testing.T) {
 
 	// Verify that the post-renderer modifications are present in the output
 	output := buf.String()
+	expected := `---
+# Source: hello/templates/goodbye
+goodbye: world
+color: blue
+---
+# Source: hello/templates/hello
+hello: world
+color: blue
+---
+# Source: hello/templates/with-partials
+hello: Earth
+color: blue
+`
 	assert.Contains(t, output, "color: blue")
 	assert.Equal(t, 3, strings.Count(output, "color: blue"))
+	assert.Equal(t, expected, output)
 }
 
 func TestRenderResources_NoPostRenderer(t *testing.T) {
@@ -896,9 +967,5 @@ func TestRenderResources_NoPostRenderer(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, hooks)
 	assert.NotNil(t, buf)
-	assert.Equal(t, "", notes) // Notes should be empty for this test
-
-	// When no post-renderer is provided, output should not contain filename annotations
-	output := buf.String()
-	assert.NotContains(t, output, "filename:")
+	assert.Equal(t, "", notes)
 }
